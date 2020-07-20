@@ -6,6 +6,7 @@ from RandAugment import RandAugment
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 import torch
+import deepdish as dd
 
 from .CutPicture import cutPicture
 
@@ -23,18 +24,17 @@ class GaussianBlur(object):
 
 
 class DegreesData(Dataset):
-    def __init__(self, class_dirs, istraining=False, sample=True):
+    def __init__(self, class_dirs, image_size, istraining=False, sample=True):
         normalize = transforms.Normalize(mean=[0.4771, 0.4769, 0.4355],
                                          std=[0.2189, 0.1199, 0.1717])
-
+        self.istraining = istraining
         if istraining:
             self.transform = transforms.Compose([
                 transforms.ColorJitter(
                     64.0 / 255, 0.75, 0.25, 0.04),
                 transforms.RandomHorizontalFlip(),
-                transforms.RandomVerticalFlip(),
                 transforms.RandomRotation(10),
-                transforms.RandomResizedCrop(256),
+                transforms.RandomResizedCrop(image_size),
                 transforms.RandomApply(
                     [GaussianBlur([.1, 2.])], p=0.5),
                 transforms.ToTensor(),
@@ -42,23 +42,27 @@ class DegreesData(Dataset):
                 transforms.RandomErasing(),
                 # transforms.ToPILImage()
             ])
+            self.group_file_list, self.images, self.labels = self.get_file_list(
+                class_dirs, sample)
 
         else:
             self.transform = transforms.Compose([
-                transforms.Resize([256, 256]),
+                transforms.Resize([image_size, image_size]),
                 transforms.ToTensor(),
                 normalize,
             ])
-        self.group_file_list, self.images, self.labels = self.get_file_list(
-            class_dirs, sample)
+            self.images = dd.io.load(
+                '/data/gukedata/valid_data/labels_list.h5')
+        print(len(self.images))
 
     def get_file_list(self, class_dirs, sample):
         group_file_list = {
             "0": [],
             "1": [],
-            "2": [],
-            "3": [],
-            "4": []
+            # "2": [],
+            # "2": [],
+            # "3": [],
+            # "4": []
         }
 
         for class_dir in class_dirs:
@@ -72,31 +76,31 @@ class DegreesData(Dataset):
                 files = os.listdir(class_dir)
                 for file in files:
                     if '.jpg' in file or '.JPG' in file:
-                        group_file_list["1"].append(
+                        group_file_list["0"].append(
                             os.path.join(class_dir, file))
             elif "16-20" in class_dir:
                 files = os.listdir(class_dir)
                 for file in files:
                     if '.jpg' in file or '.JPG' in file:
-                        group_file_list["2"].append(
+                        group_file_list["1"].append(
                             os.path.join(class_dir, file))
             elif "21-25" in class_dir:
                 files = os.listdir(class_dir)
                 for file in files:
                     if '.jpg' in file or '.JPG' in file:
-                        group_file_list["3"].append(
+                        group_file_list["1"].append(
                             os.path.join(class_dir, file))
             elif "26-45" in class_dir:
                 files = os.listdir(class_dir)
                 for file in files:
                     if '.jpg' in file or '.JPG' in file:
-                        group_file_list["4"].append(
+                        group_file_list["1"].append(
                             os.path.join(class_dir, file))
             else:
                 files = os.listdir(class_dir)
                 for file in files:
                     if '.jpg' in file or '.JPG' in file:
-                        group_file_list["4"].append(
+                        group_file_list["1"].append(
                             os.path.join(class_dir, file))
 
         sample_path = []
@@ -118,8 +122,21 @@ class DegreesData(Dataset):
 
     def __getitem__(self, index):
         file = self.images[index]
-        xmlFile = file.split('.')[0] + '.xml'
-        img, cropbox = cutPicture(file, xmlFile)
+        if self.istraining:
+            xmlFile = file.split('.')[0] + '.xml'
+            img, cropbox = cutPicture(file, xmlFile)
+            label = self.labels[index]
+        else:
+            img = Image.open(file['img_path'])
+            cropbox = file['bbox']
+            label_degree = file['degree']
+
+            if label_degree >= 15:
+                label = 1
+            # elif label_degree < 20 and label_degree > 10:
+            #     label = 1
+            else:
+                label = 0
 
         try:
             img = img.crop(cropbox)  # 后面可以追加更复杂的裁剪算法
@@ -131,7 +148,7 @@ class DegreesData(Dataset):
         # for k in self.group_file_list.keys():
         #     if file in self.group_file_list[k]:
         #         label = k
-        label = self.labels[index]
+
         return img, int(label)
 
 

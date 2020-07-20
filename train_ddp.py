@@ -184,6 +184,7 @@ def train_epoch(epoch, summary, summary_writer, model, loss_fn, optimizer, datal
 
         # mixup
         loss_func = mixup_criterion(target_a, target_b, lam)
+        # TODO: 实现顺序代价敏感
         loss = loss_func(loss_fn, output)
 
         optimizer.zero_grad()
@@ -222,13 +223,6 @@ def train_epoch(epoch, summary, summary_writer, model, loss_fn, optimizer, datal
         if args.local_rank == 0:
             time_spent = time.time() - time_now
             time_now = time.time()
-            summary_writer.add_scalar(
-                'train/loss', train_loss.val, summary['step'] + steps*epoch)
-            summary_writer.add_scalar(
-                'train/acc', train_acc.val, summary['step'] + steps*epoch)
-            # summary_writer.add_scalar(
-            #     'learning_rate', lr, summary['step'] + steps*epoch)
-            summary_writer.flush()
 
             logging.info(
                 'Epoch : {}, Step : {}, Training Loss : {:.5f}, '
@@ -242,6 +236,15 @@ def train_epoch(epoch, summary, summary_writer, model, loss_fn, optimizer, datal
         img, target = prefetcher.next()
 
     if args.local_rank == 0:
+        time_spent = time.time() - time_now
+        time_now = time.time()
+        summary_writer.add_scalar(
+            'train/loss', train_loss.val, summary['epoch'] + epoch)
+        summary_writer.add_scalar(
+            'train/acc', train_acc.val, summary['epoch'] + epoch)
+        # summary_writer.add_scalar(
+        #     'learning_rate', lr, summary['step'] + steps*epoch)
+        summary_writer.flush()
         summary['confusion_matrix'] = plot_confusion_matrix(
             confusion_matrix.matrix,
             cfg['labels'],
@@ -249,7 +252,7 @@ def train_epoch(epoch, summary, summary_writer, model, loss_fn, optimizer, datal
         # summary['loss'] = train_loss.avg
         # summary['acc'] = acc_sum / (steps * (batch_size))
         # summary['acc'] = train_acc.avg
-        summary['epoch'] += 1
+        summary['epoch'] = epoch
 
     return summary
 
@@ -291,7 +294,6 @@ def valid_epoch(summary, summary_writer, epoch, model, loss_fn, dataloader_valid
                 target = target.view(int(batch_size))
                 target = target.long()
                 loss = loss_fn(output, target)
-
                 torch.cuda.synchronize()
                 probs = F.softmax(output, dim=1)
                 _, predicts = torch.max(probs, 1)
@@ -325,6 +327,8 @@ def valid_epoch(summary, summary_writer, epoch, model, loss_fn, dataloader_valid
                             str(i),
                             summary['step'] + 1, reduced_loss, reduced_acc, time_spent))
                     summary['step'] += 1
+
+                img, target = prefetcher.next()
 
     if args.local_rank == 0:
         summary['confusion_matrix'] = plot_confusion_matrix(
@@ -365,14 +369,18 @@ def run():
     num_workers = args.num_workers
 
     model = EfficientNet.from_pretrained(
-        'efficientnet-b7', num_classes=cfg['num_classes'])
+        cfg['model'], num_classes=cfg['num_classes'])
 
     model = apex.parallel.convert_syncbn_model(model)
 
     # model = DataParallel(model, device_ids=None)
     model = model.to(device)
-    # loss_fn = nn.CrossEntropyLoss(weight=torch.Tensor([2 ,3 ,1])).to(device)
-    loss_fn = nn.CrossEntropyLoss().to(device)
+
+    loss_fn = nn.CrossEntropyLoss(
+        weight=torch.Tensor([0.5, 0.7])).to(device)
+
+    # loss_fn = nn.CrossEntropyLoss().to(device)
+    # loss_fn = [nn.CrossEntropyLoss().to(device), nn.SmoothL1Loss().to(device)]
     if cfg['optimizer'] == 'SGD':
         optimizer = optim.SGD(model.parameters(), lr=cfg['lr'], momentum=cfg['momentum'],
                               weight_decay=1e-4)
@@ -399,7 +407,8 @@ def run():
         # delay_allreduce delays all communication to the end of the backward pass.
         model = DDP(model, delay_allreduce=True)
 
-    dataset_valid = DegreesData(cfg['test_data_path'], sample=False)
+    dataset_valid = DegreesData(
+        cfg['test_data_path'], cfg['image_size'], sample=False)
 
     eval_sampler = torch.utils.data.distributed.DistributedSampler(
         dataset_valid)
@@ -425,7 +434,8 @@ def run():
     for epoch in range(args.start_epoch, args.end_epoch):
         lr = adjust_learning_rate(optimizer, epoch, cfg, args)
 
-        dataset_train = DegreesData(cfg['train_data_path'], istraining=True)
+        dataset_train = DegreesData(
+            cfg['train_data_path'], cfg['image_size'], istraining=True)
         train_sampler = torch.utils.data.distributed.DistributedSampler(
             dataset_train)
         dataloader_train = DataLoader(dataset_train,
@@ -437,12 +447,13 @@ def run():
         summary_train = train_epoch(epoch, summary_train,  summary_writer, model,
                                     loss_fn, optimizer, dataloader_train, cfg)
         if args.local_rank == 0:
-            torch.save({'epoch': summary_train['epoch'],
-                        'step': summary_train['step'],
-                        'state_dict': model.module.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'amp': amp.state_dict()},
-                       (ckpt_path_save + '/' + str(epoch) + '.ckpt'))
+            if epoch % 10 == 0:
+                torch.save({'epoch': summary_train['epoch'],
+                            'step': summary_train['step'],
+                            'state_dict': model.module.state_dict(),
+                            'optimizer': optimizer.state_dict(),
+                            'amp': amp.state_dict()},
+                           (ckpt_path_save + '/' + str(epoch) + '.ckpt'))
 
             summary_writer.add_figure(
                 'train/confusion matrix', summary_train['confusion_matrix'], epoch)
@@ -469,7 +480,6 @@ def run():
         if args.local_rank == 0:
             if summary_valid['loss'] < loss_valid_best:
                 loss_valid_best = summary_valid['loss']
-
                 torch.save({'epoch': summary_train['epoch'],
                             'step': summary_train['step'],
                             'state_dict': model.module.state_dict()},
